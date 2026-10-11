@@ -1,0 +1,5 @@
+*.pem
+*.ppk
+.env
+.last-ami-id
+*.log
