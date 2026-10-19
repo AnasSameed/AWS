@@ -1,0 +1,144 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Clinical Trial Enrollment API: HTTP API (API Gateway) + Lambda + DynamoDB.
+  Enroll, list, look up and remove trial subjects, and get an enrollment summary.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: enrollment-api
+    AllowedPattern: "[a-z0-9-]+"
+    Description: Lower-case name used for the table, function, role and API.
+  ApiToken:
+    Type: String
+    NoEcho: true            # hidden in the console and in describe-stacks output
+    MinLength: 16
+    Description: Secret that POST and DELETE calls must send in the x-api-token header (16+ characters).
+
+Resources:
+  # ---------- Data: one DynamoDB table, key = USUBJID ----------
+  SubjectsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${ProjectName}-subjects"
+      BillingMode: PAY_PER_REQUEST      # no capacity to manage; pay per read/write
+      AttributeDefinitions:
+        - { AttributeName: usubjid, AttributeType: S }
+      KeySchema:
+        - { AttributeName: usubjid, KeyType: HASH }
+
+  # ---------- Permissions: the function may touch only this table ----------
+  FunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-lambda-role-${AWS::Region}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: subjects-table-access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [dynamodb:PutItem, dynamodb:GetItem, dynamodb:DeleteItem, dynamodb:Scan]
+                Resource: !GetAtt SubjectsTable.Arn
+
+  # ---------- Compute: the Lambda function ----------
+  # Starts with a placeholder; scripts/deploy.sh (or a console .zip upload) adds the real code.
+  ApiFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Ref ProjectName
+      Runtime: python3.12
+      Architectures: [arm64]
+      Handler: app.handler
+      Role: !GetAtt FunctionRole.Arn
+      MemorySize: 256
+      Timeout: 10
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref SubjectsTable
+          API_TOKEN: !Ref ApiToken
+      Code:
+        ZipFile: |
+          import json
+          def handler(event, context):
+              return {"statusCode": 503, "body": json.dumps({"error": "Placeholder code - upload src/app.py"})}
+
+  FunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${ProjectName}"
+      RetentionInDays: 7
+
+  # ---------- Front door: an HTTP API with six routes ----------
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Ref ProjectName
+      ProtocolType: HTTP
+      CorsConfiguration:
+        AllowOrigins: ["*"]
+        AllowMethods: [GET, POST, DELETE]
+        AllowHeaders: [content-type, x-api-token]
+
+  LambdaIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt ApiFunction.Arn
+      PayloadFormatVersion: "2.0"
+
+  RouteHealth:
+    Type: AWS::ApiGatewayV2::Route
+    Properties: { ApiId: !Ref HttpApi, RouteKey: "GET /health", Target: !Sub "integrations/${LambdaIntegration}" }
+  RouteListSubjects:
+    Type: AWS::ApiGatewayV2::Route
+    Properties: { ApiId: !Ref HttpApi, RouteKey: "GET /subjects", Target: !Sub "integrations/${LambdaIntegration}" }
+  RouteEnroll:
+    Type: AWS::ApiGatewayV2::Route
+    Properties: { ApiId: !Ref HttpApi, RouteKey: "POST /subjects", Target: !Sub "integrations/${LambdaIntegration}" }
+  RouteGetSubject:
+    Type: AWS::ApiGatewayV2::Route
+    Properties: { ApiId: !Ref HttpApi, RouteKey: "GET /subjects/{usubjid}", Target: !Sub "integrations/${LambdaIntegration}" }
+  RouteDeleteSubject:
+    Type: AWS::ApiGatewayV2::Route
+    Properties: { ApiId: !Ref HttpApi, RouteKey: "DELETE /subjects/{usubjid}", Target: !Sub "integrations/${LambdaIntegration}" }
+  RouteSummary:
+    Type: AWS::ApiGatewayV2::Route
+    Properties: { ApiId: !Ref HttpApi, RouteKey: "GET /summary", Target: !Sub "integrations/${LambdaIntegration}" }
+
+  DefaultStage:
+    Type: AWS::ApiGatewayV2::Stage
+    DependsOn: [RouteHealth, RouteListSubjects, RouteEnroll, RouteGetSubject, RouteDeleteSubject, RouteSummary]
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: $default          # URL has no stage prefix: https://<id>.execute-api.<region>.amazonaws.com/subjects
+      AutoDeploy: true
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 20     # caps traffic, and therefore cost, if the URL leaks
+        ThrottlingRateLimit: 10
+
+  ApiInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref ApiFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*"
+
+Outputs:
+  ApiUrl:
+    Description: Base URL of the API
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com"
+  TableName:
+    Value: !Ref SubjectsTable
+  FunctionName:
+    Value: !Ref ApiFunction
