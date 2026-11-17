@@ -1,0 +1,23 @@
+{
+  "Rules": [
+    {
+      "ID": "TransitionAndExpireExample",
+      "Status": "Enabled",
+      "Filter": {
+        "Prefix": "archive/"
+      },
+      "Transitions": [
+        {
+          "Days": 90,
+          "StorageClass": "GLACIER"
+        }
+      ],
+      "Expiration": {
+        "Days": 730
+      },
+      "NoncurrentVersionExpiration": {
+        "NoncurrentDays": 90
+      }
+    }
+  ]
+}
